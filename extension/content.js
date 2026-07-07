@@ -23,10 +23,12 @@ window.addEventListener("error", (e) => {
   }
 
   function start() {
+    console.log("YT Transcript: start() called, href:", window.location.href);
     const existing = document.getElementById("yt-ts-root");
     if (existing) existing.remove();
 
     const id = getVideoId();
+    console.log("YT Transcript: getVideoId returned:", id);
     if (!id) return;
 
     state = { videoId: id, transcript: null, summary: null, messages: [], withTimestamps: false };
