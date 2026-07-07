@@ -97,11 +97,14 @@
   // --- inject button next to subscribe ---
   async function injectOwnerBtn() {
     if (document.getElementById("yt-ts-owner-btn")) return;
+    console.log("YT Transcript: looking for #owner");
     const owner = qs("#owner") || (await waitFor("#owner"));
-    if (!owner) return;
+    if (!owner) { console.log("YT Transcript: #owner not found"); return; }
+    console.log("YT Transcript: #owner found");
 
-    const subBtn = owner.querySelector("#subscribe-button");
-    if (!subBtn) return;
+    const subBtn = owner.querySelector("ytd-subscribe-button-renderer");
+    if (!subBtn) { console.log("YT Transcript: subscribe button not found"); return; }
+    console.log("YT Transcript: subscribe button found, injecting button");
 
     const btn = document.createElement("button");
     btn.id = "yt-ts-owner-btn";
@@ -109,6 +112,7 @@
     btn.textContent = "Transcript";
     btn.onclick = toggleTranscript;
     subBtn.parentNode.insertBefore(btn, subBtn.nextSibling);
+    console.log("YT Transcript: button injected");
   }
 
   function byId(id) { return document.getElementById(id); }
