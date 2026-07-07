@@ -17,26 +17,18 @@
   }
 
   function start() {
-    if (document.getElementById("yt-ts-panel")) {
-      cleanup();
-    }
+    const existing = document.getElementById("yt-ts-root");
+    if (existing) existing.remove();
+
     const id = getVideoId();
-    if (id) {
-      state = { videoId: id, transcript: null, summary: null, messages: [], withTimestamps: false };
-      injectPanel();
-      injectOwnerBtn();
-    }
+    if (!id) return;
+
+    state = { videoId: id, transcript: null, summary: null, messages: [], withTimestamps: false };
+    inject();
   }
 
   document.addEventListener("yt-navigate-finish", start);
   start();
-
-  function cleanup() {
-    const p = document.getElementById("yt-ts-panel");
-    const b = document.getElementById("yt-ts-owner-btn");
-    if (p) p.remove();
-    if (b) b.remove();
-  }
 
   function qs(s) { return document.querySelector(s); }
 
@@ -50,23 +42,34 @@
     });
   }
 
-  // --- inject panel below description ---
-  async function injectPanel() {
-    if (document.getElementById("yt-ts-panel")) return;
-    let target = qs("#description") || (await waitFor("#description"));
-    if (!target) return;
+  async function inject() {
+    console.log("YT Transcript: inject() called for", state.videoId);
 
-    const p = document.createElement("div");
-    p.id = "yt-ts-panel";
-    p.className = "yt-ts-panel yt-ts-hide";
-    p.innerHTML = `
-      <div class="yt-ts-body">
-        <div class="yt-ts-body-header">
-          <span class="yt-ts-body-title">Transcript</span>
-          <label class="yt-ts-tslabel">
-            <input type="checkbox" id="yt-ts-tscb" /> Timestamps
-          </label>
-        </div>
+    // Try multiple reliable targets
+    const targets = ["#primary", "#content", "#below"];
+    let target = null;
+    for (const sel of targets) {
+      target = qs(sel) || (await waitFor(sel).catch(() => null));
+      if (target) break;
+    }
+    if (!target) {
+      console.log("YT Transcript: no target element found");
+      return;
+    }
+    console.log("YT Transcript: injecting into", target.id || target.tagName);
+
+    const root = document.createElement("div");
+    root.id = "yt-ts-root";
+    root.className = "yt-ts-root";
+    root.innerHTML = `
+      <div id="yt-ts-bar" class="yt-ts-bar">
+        <span id="yt-ts-bar-icon" class="yt-ts-bar-icon">📝</span>
+        <span id="yt-ts-bar-label" class="yt-ts-bar-label">Transcript</span>
+        <label class="yt-ts-tslabel">
+          <input type="checkbox" id="yt-ts-tscb" /> Timestamps
+        </label>
+      </div>
+      <div id="yt-ts-body" class="yt-ts-body yt-ts-hide">
         <div id="yt-ts-content" class="yt-ts-content"></div>
         <div id="yt-ts-toolbar" class="yt-ts-toolbar yt-ts-hide">
           <button id="yt-ts-copy" class="yt-ts-btn yt-ts-btn-sm">📋 Copy</button>
@@ -82,8 +85,10 @@
         </div>
       </div>
     `;
-    target.parentNode.insertBefore(p, target.nextSibling);
+    target.appendChild(root);
+    console.log("YT Transcript: panel injected");
 
+    byId("yt-ts-bar").onclick = togglePanel;
     byId("yt-ts-tscb").onchange = (e) => {
       state.withTimestamps = e.target.checked;
       if (state.transcript) renderTranscript();
@@ -94,40 +99,19 @@
     byId("yt-ts-chatin").onkeydown = (e) => { if (e.key === "Enter") sendChat(); };
   }
 
-  // --- inject button next to subscribe ---
-  async function injectOwnerBtn() {
-    if (document.getElementById("yt-ts-owner-btn")) return;
-    console.log("YT Transcript: looking for #owner");
-    const owner = qs("#owner") || (await waitFor("#owner"));
-    if (!owner) { console.log("YT Transcript: #owner not found"); return; }
-    console.log("YT Transcript: #owner found");
-
-    const subBtn = owner.querySelector("ytd-subscribe-button-renderer");
-    if (!subBtn) { console.log("YT Transcript: subscribe button not found"); return; }
-    console.log("YT Transcript: subscribe button found, injecting button");
-
-    const btn = document.createElement("button");
-    btn.id = "yt-ts-owner-btn";
-    btn.className = "yt-ts-owner-btn";
-    btn.textContent = "Transcript";
-    btn.onclick = toggleTranscript;
-    subBtn.parentNode.insertBefore(btn, subBtn.nextSibling);
-    console.log("YT Transcript: button injected");
-  }
-
   function byId(id) { return document.getElementById(id); }
 
-  function toggleTranscript() {
-    const panel = byId("yt-ts-panel");
-    const btn = byId("yt-ts-owner-btn");
-    if (!panel) return;
-    if (panel.classList.contains("yt-ts-hide")) {
-      panel.classList.remove("yt-ts-hide");
-      btn.textContent = "Hide";
+  function togglePanel() {
+    const body = byId("yt-ts-body");
+    const icon = byId("yt-ts-bar-icon");
+    if (!body) return;
+    if (body.classList.contains("yt-ts-hide")) {
+      body.classList.remove("yt-ts-hide");
+      icon.textContent = "📄";
       if (!state.transcript) fetchTranscript();
     } else {
-      panel.classList.add("yt-ts-hide");
-      btn.textContent = "Transcript";
+      body.classList.add("yt-ts-hide");
+      icon.textContent = "📝";
     }
   }
 
