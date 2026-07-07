@@ -1,3 +1,9 @@
+console.log("YT Transcript: script loaded");
+
+window.addEventListener("error", (e) => {
+  console.log("YT Transcript error:", e.message, e.filename, e.lineno);
+});
+
 (function () {
   "use strict";
 
@@ -45,15 +51,19 @@
   async function inject() {
     console.log("YT Transcript: inject() called for", state.videoId);
 
-    // Try multiple reliable targets
-    const targets = ["#primary", "#content", "#below"];
+    const targets = ["#primary", "#content", "#below", "#page-manager", "body"];
     let target = null;
     for (const sel of targets) {
-      target = qs(sel) || (await waitFor(sel).catch(() => null));
+      console.log("YT Transcript: trying", sel);
+      try {
+        target = qs(sel) || (await waitFor(sel));
+      } catch (e) {
+        console.log("YT Transcript: waitFor failed for", sel, e.message);
+      }
       if (target) break;
     }
     if (!target) {
-      console.log("YT Transcript: no target element found");
+      console.log("YT Transcript: NO TARGET FOUND - all selectors failed");
       return;
     }
     console.log("YT Transcript: injecting into", target.id || target.tagName);
