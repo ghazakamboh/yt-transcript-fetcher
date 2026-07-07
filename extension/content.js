@@ -1,311 +1,299 @@
 (function () {
   "use strict";
 
-  let state = { videoId: null, transcript: null, summary: null, messages: [], withTimestamps: false };
+  // ===== State =====
+  const state = {
+    videoId: null,
+    transcript: null,
+    summary: null,
+    messages: [],
+    withTimestamps: false,
+    initialized: false
+  };
 
-  function getVideoId() {
+  // ===== Utilities =====
+  const byId = (id) => document.getElementById(id);
+  const qs = (sel, root = document) => root.querySelector(sel);
+
+  const waitFor = (selector, root = document, timeout = 10000) => {
+    return new Promise((resolve, reject) => {
+      const el = qs(selector, root);
+      if (el) return resolve(el);
+      const observer = new MutationObserver(() => {
+        const found = qs(selector, root);
+        if (found) {
+          observer.disconnect();
+          resolve(found);
+        }
+      });
+      observer.observe(root, { childList: true, subtree: true });
+      setTimeout(() => { observer.disconnect(); reject(new Error("Timeout waiting for " + selector)); }, timeout);
+    });
+  };
+
+  const getVideoId = () => {
     try {
       const u = new URL(window.location.href);
       if (u.pathname === "/watch") return u.searchParams.get("v");
       if (u.pathname.startsWith("/shorts/")) return u.pathname.split("/")[2];
     } catch (e) {}
     return null;
-  }
+  };
 
-  function inject() {
-    if (document.getElementById("yt-ts-root")) return;
-    const vid = getVideoId();
-    if (!vid) return;
-    state.videoId = vid;
+  const fmtTs = (sec) => {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  };
 
-    // Find injection target: try multiple selectors
+  const esc = (s) => {
+    const d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  };
+
+  // ===== API Calls =====
+  const api = {
+    fetchTranscript: async (videoId) => {
+      const res = await fetch(`https://youtubetranscript.com/api?vid=${videoId}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+
+    callOpenRouter: async (apiKey, messages, model = "meta-llama/llama-3.2-3b-instruct:free") => {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ model, messages, max_tokens: 2048 }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error?.message || `HTTP ${res.status}`);
+      }
+      return res.json();
+    }
+  };
+
+  // ===== UI Functions =====
+  function buildPanel() {
+    if (qs("#yt-ts-root")) return;
+
     const targets = ["#primary", "#below", "#content", "#page-manager", "#columns"];
     let target = null;
     for (const sel of targets) {
-      target = document.querySelector(sel);
+      target = qs(sel);
       if (target) break;
     }
-    // Absolute fallback: inject after the video player
     if (!target) {
-      const player = document.querySelector("#movie_player, #player-container, #player");
-      if (player && player.parentNode) {
-        target = player.parentNode;
-      }
+      const player = qs("#movie_player, #player-container, #player");
+      if (player?.parentNode) target = player.parentNode;
     }
-    // Last resort: body itself
     if (!target) target = document.body;
     if (!target) return;
 
-    // Build panel
     const root = document.createElement("div");
     root.id = "yt-ts-root";
-    root.style.cssText =
-      "margin:8px 0;font-family:Roboto,Arial,sans-serif;font-size:14px;line-height:1.5;color:#0f0f0f;";
+    root.innerHTML = `
+      <div class="yt-ts-bar" id="yt-ts-bar">
+        <span class="yt-ts-icon" id="yt-ts-icon">📝</span>
+        <span class="yt-ts-label" id="yt-ts-label">Transcript</span>
+        <label class="yt-ts-tslabel">
+          <input type="checkbox" id="yt-ts-tscb"> Timestamps
+        </label>
+      </div>
+      <div class="yt-ts-body yt-ts-hide" id="yt-ts-body">
+        <div class="yt-ts-content" id="yt-ts-content"></div>
+        <div class="yt-ts-toolbar yt-ts-hide" id="yt-ts-toolbar">
+          <button class="yt-ts-btn yt-ts-btn-sm" id="yt-ts-copy">📋 Copy</button>
+          <button class="yt-ts-btn yt-ts-btn-sm" id="yt-ts-sum">✨ Summarize</button>
+        </div>
+        <div class="yt-ts-summary yt-ts-hide" id="yt-ts-summary"></div>
+        <div class="yt-ts-chat yt-ts-hide" id="yt-ts-chat">
+          <div class="yt-ts-chatmsgs" id="yt-ts-chatmsgs"></div>
+          <div class="yt-ts-chatrow">
+            <input type="text" class="yt-ts-chatin" id="yt-ts-chatin" placeholder="Ask about this video...">
+            <button class="yt-ts-btn yt-ts-btn-sm" id="yt-ts-chatsend">Send</button>
+          </div>
+        </div>
+      </div>
+    `;
 
-    const bar = document.createElement("div");
-    bar.id = "yt-ts-bar";
-    bar.style.cssText =
-      "display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid #e0e0e0;border-radius:8px;background:#fff;cursor:pointer;user-select:none;";
-    bar.onmouseenter = function () { this.style.background = "#f0f0f0"; };
-    bar.onmouseleave = function () { this.style.background = "#fff"; };
-
-    const icon = document.createElement("span");
-    icon.id = "yt-ts-icon";
-    icon.textContent = "📝";
-    icon.style.fontSize = "16px";
-
-    const label = document.createElement("span");
-    label.id = "yt-ts-label";
-    label.textContent = "Transcript";
-    label.style.cssText = "flex:1;font-weight:500;font-size:14px;";
-
-    const tsLabel = document.createElement("label");
-    tsLabel.style.cssText = "display:flex;align-items:center;gap:6px;font-size:13px;color:#606060;cursor:pointer;";
-    const tsCheck = document.createElement("input");
-    tsCheck.type = "checkbox";
-    tsCheck.id = "yt-ts-tscb";
-    tsLabel.appendChild(tsCheck);
-    tsLabel.appendChild(document.createTextNode("Timestamps"));
-
-    bar.appendChild(icon);
-    bar.appendChild(label);
-    bar.appendChild(tsLabel);
-    root.appendChild(bar);
-
-    // Body (collapsible)
-    const body = document.createElement("div");
-    body.id = "yt-ts-body";
-    body.style.cssText =
-      "display:none;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;padding:12px;background:#fff;";
-
-    const content = document.createElement("div");
-    content.id = "yt-ts-content";
-    content.style.cssText = "max-height:400px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;font-size:13px;line-height:1.6;padding:4px 0;";
-    body.appendChild(content);
-
-    const toolbar = document.createElement("div");
-    toolbar.id = "yt-ts-toolbar";
-    toolbar.style.cssText = "display:none;gap:8px;padding:8px 0 0;border-top:1px solid #e0e0e0;margin-top:8px;";
-
-    const copyBtn = document.createElement("button");
-    copyBtn.id = "yt-ts-copy";
-    copyBtn.textContent = "📋 Copy";
-    copyBtn.style.cssText = "border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;background:#065fd4;color:#fff;padding:6px 12px;";
-    copyBtn.onclick = copyTranscript;
-    toolbar.appendChild(copyBtn);
-
-    const sumBtn = document.createElement("button");
-    sumBtn.id = "yt-ts-sum";
-    sumBtn.textContent = "✨ Summarize";
-    sumBtn.style.cssText = "border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;background:#065fd4;color:#fff;padding:6px 12px;";
-    sumBtn.onclick = summarize;
-    toolbar.appendChild(sumBtn);
-
-    body.appendChild(toolbar);
-
-    const summaryDiv = document.createElement("div");
-    summaryDiv.id = "yt-ts-summary";
-    summaryDiv.style.cssText = "display:none;border-top:1px solid #e0e0e0;margin-top:8px;padding-top:8px;";
-    body.appendChild(summaryDiv);
-
-    const chatDiv = document.createElement("div");
-    chatDiv.id = "yt-ts-chat";
-    chatDiv.style.cssText = "display:none;border-top:1px solid #e0e0e0;margin-top:8px;padding-top:8px;";
-
-    const chatMsgs = document.createElement("div");
-    chatMsgs.id = "yt-ts-chatmsgs";
-    chatMsgs.style.cssText = "max-height:300px;overflow-y:auto;margin-bottom:8px;";
-    chatDiv.appendChild(chatMsgs);
-
-    const chatRow = document.createElement("div");
-    chatRow.style.cssText = "display:flex;gap:6px;";
-    const chatInput = document.createElement("input");
-    chatInput.type = "text";
-    chatInput.id = "yt-ts-chatin";
-    chatInput.placeholder = "Ask about this video...";
-    chatInput.style.cssText = "flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:6px;font-size:13px;outline:none;background:#fff;color:#0f0f0f;";
-    chatInput.onkeydown = function (e) { if (e.key === "Enter") sendChat(); };
-    const chatSend = document.createElement("button");
-    chatSend.textContent = "Send";
-    chatSend.style.cssText = "border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;background:#065fd4;color:#fff;padding:6px 12px;";
-    chatSend.onclick = sendChat;
-    chatRow.appendChild(chatInput);
-    chatRow.appendChild(chatSend);
-    chatDiv.appendChild(chatRow);
-    body.appendChild(chatDiv);
-
-    root.appendChild(body);
-    target.appendChild(root);
-
-    // Bind bar click
-    bar.onclick = function () {
-      if (body.style.display === "none") {
-        body.style.display = "block";
-        icon.textContent = "📄";
-        if (!state.transcript) fetchTranscript();
-      } else {
-        body.style.display = "none";
-        icon.textContent = "📝";
-      }
-    };
-
-    tsCheck.onchange = function () {
-      state.withTimestamps = this.checked;
-      if (state.transcript) renderTranscript();
-    };
+    const container = document.createElement("div");
+    container.id = "yt-ts-root";
+    container.appendChild(root.firstElementChild);
+    target.appendChild(container);
   }
 
-  function byId(id) { return document.getElementById(id); }
-  function qs(s) { return document.querySelector(s); }
+  function destroyPanel() {
+    const existing = qs("#yt-ts-root");
+    if (existing) existing.remove();
+  }
 
-  async function fetchTranscript() {
-    const el = byId("yt-ts-content");
-    if (!el) return;
-    el.innerHTML = '<span style="color:#606060;font-style:italic;">Loading transcript...</span>';
-
-    try {
-      const r = await chrome.runtime.sendMessage({ action: "fetchTranscript", videoId: state.videoId });
-      if (!r.success) throw new Error(r.error);
-      state.transcript = r.data;
-      renderTranscript();
-      const tb = byId("yt-ts-toolbar");
-      if (tb) tb.style.display = "flex";
-    } catch (e) {
-      el.innerHTML = '<span style="color:#f85149;">' + esc(e.message) + "</span>";
-    }
+  function toggleBody() {
+    const body = qs("#yt-ts-body");
+    const icon = qs("#yt-ts-icon");
+    if (!body) return;
+    const hidden = body.classList.toggle("yt-ts-hide");
+    if (icon) icon.textContent = hidden ? "📝" : "📄";
+    if (!hidden && !state.transcript) fetchTranscript();
   }
 
   function renderTranscript() {
-    const el = byId("yt-ts-content");
+    const el = qs("#yt-ts-content");
     if (!el || !state.transcript) return;
-    const lines = state.transcript.map(function (s) {
-      return state.withTimestamps ? fmtTs(s.start) + " " + s.text : s.text;
-    });
-    const cleaned = lines.filter(function (l, i, a) { return i === 0 || l !== a[i - 1]; });
-    el.innerHTML = '<div style="padding:4px 0;">' + esc(cleaned.join("\n")) + "</div>";
+    const lines = state.transcript.map(s => state.withTimestamps ? `${fmtTs(s.start)} ${s.text}` : s.text);
+    const cleaned = lines.filter((l, i, a) => i === 0 || l !== a[i - 1]);
+    el.innerHTML = `<div class="yt-ts-text">${esc(cleaned.join("\n"))}</div>`;
   }
 
-  function fmtTs(sec) {
-    var h = Math.floor(sec / 3600);
-    var m = Math.floor((sec % 3600) / 60);
-    var s = Math.floor(sec % 60);
-    return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
-  }
-
-  function copyTranscript() {
-    var t = qs("#yt-ts-content div");
-    if (!t) return;
-    navigator.clipboard.writeText(t.textContent).then(function () {
-      var btn = byId("yt-ts-copy");
-      if (!btn) return;
-      btn.textContent = "✅ Copied!";
-      setTimeout(function () { btn.textContent = "📋 Copy"; }, 2000);
-    });
+  async function fetchTranscript() {
+    const el = qs("#yt-ts-content");
+    if (!el) return;
+    el.innerHTML = '<div class="yt-ts-loading">Loading transcript...</div>';
+    try {
+      const data = await api.fetchTranscript(state.videoId);
+      state.transcript = data;
+      renderTranscript();
+      const tb = qs("#yt-ts-toolbar");
+      if (tb) tb.classList.remove("yt-ts-hide");
+    } catch (e) {
+      el.innerHTML = `<div class="yt-ts-err">${esc(e.message)}</div>`;
+    }
   }
 
   async function summarize() {
-    if (!state.transcript || !state.transcript.length) return;
-    var div = byId("yt-ts-summary");
-    if (!div) return;
-    div.style.display = "block";
-    div.innerHTML = '<span style="color:#606060;font-style:italic;">Summarizing...</span>';
+    if (!state.transcript?.length) return;
+    const div = qs("#yt-ts-summary");
+    div.classList.remove("yt-ts-hide");
+    div.innerHTML = '<div class="yt-ts-loading">Summarizing...</div>';
 
-    var keyResult = await chrome.storage.sync.get(["apiKey"]);
+    const keyResult = await chrome.storage.sync.get(["apiKey"]);
     if (!keyResult.apiKey) {
-      div.innerHTML = '<span style="color:#f85149;">Set your OpenRouter API key in the extension popup first.</span>';
+      div.innerHTML = '<div class="yt-ts-err">Set your OpenRouter API key in the extension popup first.</div>';
       return;
     }
 
-    var plain = state.transcript.map(function (s) { return s.text; }).join(" ").slice(0, 12000);
-
+    const plain = state.transcript.map(s => s.text).join(" ").slice(0, 12000);
     try {
-      var r = await chrome.runtime.sendMessage({
-        action: "callOpenRouter",
-        apiKey: keyResult.apiKey,
-        messages: [
-          { role: "system", content: "You are a helpful assistant. Summarize the following YouTube transcript concisely in bullet points." },
-          { role: "user", content: "Summarize this transcript:\n\n" + plain },
-        ],
-      });
-      if (!r.success) throw new Error(r.error);
-      var reply = r.data.choices[0].message.content;
+      const res = await api.callOpenRouter(keyResult.apiKey, [
+        { role: "system", content: "You are a helpful assistant. Summarize the following YouTube transcript concisely in bullet points." },
+        { role: "user", content: `Summarize this transcript:\n\n${plain}` }
+      ]);
+      const reply = res.choices[0].message.content;
       state.summary = reply;
-      div.innerHTML = '<div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">' + esc(reply) + "</div>";
-      var chat = byId("yt-ts-chat");
-      if (chat) chat.style.display = "block";
+      div.innerHTML = `<div class="yt-ts-sumtext">${esc(reply)}</div>`;
+      qs("#yt-ts-chat")?.classList.remove("yt-ts-hide");
     } catch (e) {
-      div.innerHTML = '<span style="color:#f85149;">' + esc(e.message) + "</span>";
+      div.innerHTML = `<div class="yt-ts-err">${esc(e.message)}</div>`;
     }
   }
 
   async function sendChat() {
-    var input = byId("yt-ts-chatin");
+    const input = qs("#yt-ts-chatin");
     if (!input) return;
-    var q = input.value.trim();
+    const q = input.value.trim();
     if (!q) return;
     input.value = "";
 
-    var msgs = byId("yt-ts-chatmsgs");
-    if (!msgs) return;
+    const msgs = qs("#yt-ts-chatmsgs");
     addMsg(msgs, "user", q);
-    var loader = addMsg(msgs, "bot", "Thinking...");
+    const loader = addMsg(msgs, "bot", "Thinking...");
 
-    var keyResult = await chrome.storage.sync.get(["apiKey"]);
+    const keyResult = await chrome.storage.sync.get(["apiKey"]);
     if (!keyResult.apiKey) {
       loader.textContent = "Set your OpenRouter API key in the extension popup first.";
       return;
     }
 
-    var plain = state.transcript.map(function (s) { return s.text; }).join(" ").slice(0, 12000);
-
+    const plain = state.transcript.map(s => s.text).join(" ").slice(0, 12000);
     try {
-      var r = await chrome.runtime.sendMessage({
-        action: "callOpenRouter",
-        apiKey: keyResult.apiKey,
-        messages: [
-          { role: "system", content: "You are analyzing a YouTube transcript. Answer the user's question based ONLY on this transcript.\n\nTranscript:\n" + plain },
-          { role: "user", content: q },
-        ],
-      });
+      const res = await api.callOpenRouter(keyResult.apiKey, [
+        { role: "system", content: `You are analyzing a YouTube transcript. Answer the user's question based ONLY on this transcript.\n\nTranscript:\n${plain}` },
+        { role: "user", content: q }
+      ]);
       loader.remove();
-      if (!r.success) throw new Error(r.error);
-      addMsg(msgs, "bot", r.data.choices[0].message.content);
+      addMsg(msgs, "bot", res.choices[0].message.content);
     } catch (e) {
       loader.textContent = e.message;
     }
   }
 
-  function addMsg(c, role, text) {
-    var d = document.createElement("div");
-    d.style.cssText = "padding:6px 8px;margin-bottom:4px;border-radius:6px;font-size:13px;" + (role === "user" ? "background:#f0f0f0;text-align:right;" : "");
+  function addMsg(container, role, text) {
+    const d = document.createElement("div");
+    d.className = `yt-ts-msg yt-ts-msg${role}`;
     d.textContent = text;
-    c.appendChild(d);
-    c.scrollTop = c.scrollHeight;
+    container.appendChild(d);
+    container.scrollTop = container.scrollHeight;
     return d;
   }
 
-  function esc(s) {
-    var d = document.createElement("div");
-    d.textContent = s;
-    return d.innerHTML;
+  // ===== Event Binding =====
+  function bindEvents() {
+    const bar = qs("#yt-ts-bar");
+    if (bar) bar.onclick = toggleBody;
+    const tsCb = qs("#yt-ts-tscb");
+    if (tsCb) tsCb.onchange = e => { state.withTimestamps = e.target.checked; if (state.transcript) renderTranscript(); };
+    qs("#yt-ts-copy")?.addEventListener("click", copyTranscript);
+    qs("#yt-ts-sum")?.addEventListener("click", summarize);
+    qs("#yt-ts-chatsend")?.addEventListener("click", sendChat);
+    qs("#yt-ts-chatin")?.addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
   }
 
-  // ==== Boot ====
-  // Inject immediately
-  setTimeout(inject, 500);
-  setTimeout(inject, 2000);
-  setTimeout(inject, 5000);
+  async function copyTranscript() {
+    const t = qs("#yt-ts-content .yt-ts-text");
+    if (!t) return;
+    await navigator.clipboard.writeText(t.textContent);
+    const btn = qs("#yt-ts-copy");
+    btn.textContent = "✅ Copied!";
+    setTimeout(() => btn.textContent = "📋 Copy", 2000);
+  }
 
-  // Re-inject on YouTube SPA navigation
-  var lastUrl = location.href;
-  setInterval(function () {
+  // ===== Navigation Handling =====
+  let lastUrl = location.href;
+  function checkUrlChange() {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
-      var existing = document.getElementById("yt-ts-root");
+      const existing = qs("#yt-ts-root");
       if (existing) existing.remove();
-      state = { videoId: null, transcript: null, summary: null, messages: [], withTimestamps: false };
-      setTimeout(inject, 1000);
-      setTimeout(inject, 3000);
+      state.videoId = null;
+      state.transcript = null;
+      state.summary = null;
+      state.messages = [];
+      state.withTimestamps = false;
+      state.initialized = false;
+      setTimeout(init, 500);
     }
-  }, 500);
+  }
+
+  // ===== Init =====
+  async function init() {
+    if (state.initialized) return;
+
+    const vid = getVideoId();
+    if (!vid) return;
+
+    state.videoId = vid;
+    state.initialized = true;
+
+    buildPanel();
+    bindEvents();
+
+    // Wait for panel to be in DOM before binding
+    await new Promise(r => setTimeout(r, 0));
+    bindEvents();
+  }
+
+  // Start
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+
+  // Watch for SPA navigation
+  setInterval(checkUrlChange, 500);
 })();
