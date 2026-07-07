@@ -17,55 +17,56 @@
   }
 
   function start() {
+    if (document.getElementById("yt-ts-panel")) {
+      cleanup();
+    }
     const id = getVideoId();
     if (id) {
-      state.videoId = id;
-      inject();
+      state = { videoId: id, transcript: null, summary: null, messages: [], withTimestamps: false };
+      injectPanel();
+      injectOwnerBtn();
     }
   }
 
   document.addEventListener("yt-navigate-finish", start);
   start();
 
-  function qs(sel) {
-    return document.querySelector(sel);
+  function cleanup() {
+    const p = document.getElementById("yt-ts-panel");
+    const b = document.getElementById("yt-ts-owner-btn");
+    if (p) p.remove();
+    if (b) b.remove();
   }
 
-  function waitForElm(selector) {
-    return new Promise((resolve) => {
-      if (qs(selector)) return resolve(qs(selector));
-      const mo = new MutationObserver(() => {
-        if (qs(selector)) {
-          mo.disconnect();
-          resolve(qs(selector));
-        }
+  function qs(s) { return document.querySelector(s); }
+
+  function waitFor(sel) {
+    return new Promise((r) => {
+      if (qs(sel)) return r(qs(sel));
+      const o = new MutationObserver(() => {
+        if (qs(sel)) { o.disconnect(); r(qs(sel)); }
       });
-      mo.observe(document.body, { childList: true, subtree: true });
+      o.observe(document.body, { childList: true, subtree: true });
     });
   }
 
-  async function inject() {
+  // --- inject panel below description ---
+  async function injectPanel() {
     if (document.getElementById("yt-ts-panel")) return;
-
-    let target;
-    if (qs("#description")) {
-      target = qs("#description");
-    } else {
-      target = await waitForElm("#description");
-    }
+    let target = qs("#description") || (await waitFor("#description"));
     if (!target) return;
 
-    const panel = document.createElement("div");
-    panel.id = "yt-ts-panel";
-    panel.className = "yt-ts-panel";
-    panel.innerHTML = `
-      <div class="yt-ts-bar">
-        <button id="yt-ts-toggle" class="yt-ts-btn yt-ts-btn-primary">📝 Get Transcript</button>
-        <label class="yt-ts-tslabel">
-          <input type="checkbox" id="yt-ts-tscb" /> Timestamps
-        </label>
-      </div>
-      <div id="yt-ts-body" class="yt-ts-body yt-ts-hide">
+    const p = document.createElement("div");
+    p.id = "yt-ts-panel";
+    p.className = "yt-ts-panel yt-ts-hide";
+    p.innerHTML = `
+      <div class="yt-ts-body">
+        <div class="yt-ts-body-header">
+          <span class="yt-ts-body-title">Transcript</span>
+          <label class="yt-ts-tslabel">
+            <input type="checkbox" id="yt-ts-tscb" /> Timestamps
+          </label>
+        </div>
         <div id="yt-ts-content" class="yt-ts-content"></div>
         <div id="yt-ts-toolbar" class="yt-ts-toolbar yt-ts-hide">
           <button id="yt-ts-copy" class="yt-ts-btn yt-ts-btn-sm">📋 Copy</button>
@@ -81,12 +82,8 @@
         </div>
       </div>
     `;
-    target.parentNode.insertBefore(panel, target.nextSibling);
-    bind();
-  }
+    target.parentNode.insertBefore(p, target.nextSibling);
 
-  function bind() {
-    byId("yt-ts-toggle").onclick = toggle;
     byId("yt-ts-tscb").onchange = (e) => {
       state.withTimestamps = e.target.checked;
       if (state.transcript) renderTranscript();
@@ -94,37 +91,48 @@
     byId("yt-ts-copy").onclick = copyTranscript;
     byId("yt-ts-sum").onclick = summarize;
     byId("yt-ts-chatsend").onclick = sendChat;
-    byId("yt-ts-chatin").onkeydown = (e) => {
-      if (e.key === "Enter") sendChat();
-    };
+    byId("yt-ts-chatin").onkeydown = (e) => { if (e.key === "Enter") sendChat(); };
   }
 
-  function byId(id) {
-    return document.getElementById(id);
+  // --- inject button next to subscribe ---
+  async function injectOwnerBtn() {
+    if (document.getElementById("yt-ts-owner-btn")) return;
+    const owner = qs("#owner") || (await waitFor("#owner"));
+    if (!owner) return;
+
+    const subBtn = owner.querySelector("#subscribe-button");
+    if (!subBtn) return;
+
+    const btn = document.createElement("button");
+    btn.id = "yt-ts-owner-btn";
+    btn.className = "yt-ts-owner-btn";
+    btn.textContent = "Transcript";
+    btn.onclick = toggleTranscript;
+    subBtn.parentNode.insertBefore(btn, subBtn.nextSibling);
   }
 
-  function toggle() {
-    const body = byId("yt-ts-body");
-    const btn = byId("yt-ts-toggle");
-    if (body.classList.contains("yt-ts-hide")) {
-      body.classList.remove("yt-ts-hide");
-      btn.textContent = "📝 Hide Transcript";
+  function byId(id) { return document.getElementById(id); }
+
+  function toggleTranscript() {
+    const panel = byId("yt-ts-panel");
+    const btn = byId("yt-ts-owner-btn");
+    if (!panel) return;
+    if (panel.classList.contains("yt-ts-hide")) {
+      panel.classList.remove("yt-ts-hide");
+      btn.textContent = "Hide";
       if (!state.transcript) fetchTranscript();
     } else {
-      body.classList.add("yt-ts-hide");
-      btn.textContent = "📝 Get Transcript";
+      panel.classList.add("yt-ts-hide");
+      btn.textContent = "Transcript";
     }
   }
 
   async function fetchTranscript() {
     const el = byId("yt-ts-content");
-    el.innerHTML = `<div class="yt-ts-loading">Loading transcript...</div>`;
+    el.innerHTML = '<div class="yt-ts-loading">Loading transcript...</div>';
 
     try {
-      const r = await chrome.runtime.sendMessage({
-        action: "fetchTranscript",
-        videoId: state.videoId,
-      });
+      const r = await chrome.runtime.sendMessage({ action: "fetchTranscript", videoId: state.videoId });
       if (!r.success) throw new Error(r.error);
       state.transcript = r.data;
       renderTranscript();
@@ -140,9 +148,7 @@
       const t = s.text;
       return state.withTimestamps ? `${fmtTs(s.start)} ${t}` : t;
     });
-    const cleaned = lines.filter(
-      (l, i, a) => i === 0 || l !== a[i - 1]
-    );
+    const cleaned = lines.filter((l, i, a) => i === 0 || l !== a[i - 1]);
     el.innerHTML = `<div class="yt-ts-text">${esc(cleaned.join("\n"))}</div>`;
   }
 
@@ -167,11 +173,11 @@
     if (!state.transcript || !state.transcript.length) return;
     const div = byId("yt-ts-summary");
     div.classList.remove("yt-ts-hide");
-    div.innerHTML = `<div class="yt-ts-loading">Summarizing...</div>`;
+    div.innerHTML = '<div class="yt-ts-loading">Summarizing...</div>';
 
     const keyResult = await chrome.storage.sync.get(["apiKey"]);
     if (!keyResult.apiKey) {
-      div.innerHTML = `<div class="yt-ts-err">Set your OpenRouter API key in the extension popup first.</div>`;
+      div.innerHTML = '<div class="yt-ts-err">Set your OpenRouter API key in the extension popup first.</div>';
       return;
     }
 
@@ -182,11 +188,7 @@
         action: "callOpenRouter",
         apiKey: keyResult.apiKey,
         messages: [
-          {
-            role: "system",
-            content:
-              "You are a helpful assistant. Summarize the following YouTube transcript concisely in bullet points.",
-          },
+          { role: "system", content: "You are a helpful assistant. Summarize the following YouTube transcript concisely in bullet points." },
           { role: "user", content: `Summarize this transcript:\n\n${plain}` },
         ],
       });
@@ -208,7 +210,6 @@
 
     const msgs = byId("yt-ts-chatmsgs");
     addMsg(msgs, "user", q);
-
     const loader = addMsg(msgs, "bot", "Thinking...");
 
     const keyResult = await chrome.storage.sync.get(["apiKey"]);
@@ -225,10 +226,7 @@
         action: "callOpenRouter",
         apiKey: keyResult.apiKey,
         messages: [
-          {
-            role: "system",
-            content: `You are analyzing a YouTube transcript. Answer the user's question based ONLY on this transcript.\n\nTranscript:\n${plain}`,
-          },
+          { role: "system", content: `You are analyzing a YouTube transcript. Answer the user's question based ONLY on this transcript.\n\nTranscript:\n${plain}` },
           { role: "user", content: q },
         ],
       });
@@ -241,13 +239,13 @@
     }
   }
 
-  function addMsg(container, role, text) {
-    const div = document.createElement("div");
-    div.className = `yt-ts-msg yt-ts-msg${role}`;
-    div.textContent = text;
-    container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
-    return div;
+  function addMsg(c, role, text) {
+    const d = document.createElement("div");
+    d.className = `yt-ts-msg yt-ts-msg${role}`;
+    d.textContent = text;
+    c.appendChild(d);
+    c.scrollTop = c.scrollHeight;
+    return d;
   }
 
   function esc(s) {
